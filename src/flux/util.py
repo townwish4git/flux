@@ -1,33 +1,58 @@
+import importlib.util
+import logging
 import os
+import sys
 from dataclasses import dataclass
+from typing import List, Optional
 
-import torch
-from einops import rearrange
+import mindspore as ms
 from huggingface_hub import hf_hub_download
 from imwatermark import WatermarkEncoder
-from safetensors.torch import load_file as load_sft
+from mindone.safetensors.mindspore import load_file as load_sft
+from mindspore import ops
 
 from flux.model import Flux, FluxParams
 from flux.modules.autoencoder import AutoEncoder, AutoEncoderParams
 from flux.modules.conditioner import HFEmbedder
+
+if sys.version_info < (3, 8):
+    import importlib_metadata
+else:
+    import importlib.metadata as importlib_metadata
+
+
+logger = logging.getLogger(__name__)
+
+
+_torch_available = importlib.util.find_spec("torch") is not None
+if _torch_available:
+    try:
+        _torch_version = importlib_metadata.version("torch")
+        logger.info(f"PyTorch version {_torch_version} available.")
+    except importlib_metadata.PackageNotFoundError:
+        _torch_available = False
+
+
+def is_torch_available():
+    return _torch_available
 
 
 @dataclass
 class ModelSpec:
     params: FluxParams
     ae_params: AutoEncoderParams
-    ckpt_path: str | None
-    ae_path: str | None
-    repo_id: str | None
-    repo_flow: str | None
-    repo_ae: str | None
+    ckpt_path: Optional[str]
+    ae_path: Optional[str]
+    repo_id: Optional[str]
+    repo_flow: Optional[str]
+    repo_ae: Optional[str]
 
 
 configs = {
     "flux-dev": ModelSpec(
         repo_id="black-forest-labs/FLUX.1-dev",
-        repo_flow="flux1-dev.sft",
-        repo_ae="ae.sft",
+        repo_flow="flux1-dev.safetensors",
+        repo_ae="ae.safetensors",
         ckpt_path=os.getenv("FLUX_DEV"),
         params=FluxParams(
             in_channels=64,
@@ -58,8 +83,8 @@ configs = {
     ),
     "flux-schnell": ModelSpec(
         repo_id="black-forest-labs/FLUX.1-schnell",
-        repo_flow="flux1-schnell.sft",
-        repo_ae="ae.sft",
+        repo_flow="flux1-schnell.safetensors",
+        repo_ae="ae.safetensors",
         ckpt_path=os.getenv("FLUX_SCHNELL"),
         params=FluxParams(
             in_channels=64,
@@ -91,20 +116,24 @@ configs = {
 }
 
 
-def print_load_warning(missing: list[str], unexpected: list[str]) -> None:
+def print_load_warning(missing: List[str], unexpected: List[str]) -> None:
     if len(missing) > 0 and len(unexpected) > 0:
-        print(f"Got {len(missing)} missing keys:\n\t" + "\n\t".join(missing))
-        print("\n" + "-" * 79 + "\n")
-        print(f"Got {len(unexpected)} unexpected keys:\n\t" + "\n\t".join(unexpected))
+        logger.info(f"Got {len(missing)} missing keys:\n\t" + "\n\t".join(missing))
+        logger.info("\n" + "-" * 79 + "\n")
+        logger.info(
+            f"Got {len(unexpected)} unexpected keys:\n\t" + "\n\t".join(unexpected)
+        )
     elif len(missing) > 0:
-        print(f"Got {len(missing)} missing keys:\n\t" + "\n\t".join(missing))
+        logger.info(f"Got {len(missing)} missing keys:\n\t" + "\n\t".join(missing))
     elif len(unexpected) > 0:
-        print(f"Got {len(unexpected)} unexpected keys:\n\t" + "\n\t".join(unexpected))
+        logger.info(
+            f"Got {len(unexpected)} unexpected keys:\n\t" + "\n\t".join(unexpected)
+        )
 
 
-def load_flow_model(name: str, device: str | torch.device = "cuda", hf_download: bool = True):
+def load_flow_model(name: str, hf_download: bool = True):
     # Loading Flux
-    print("Init model")
+    logger.info("Init model")
     ckpt_path = configs[name].ckpt_path
     if (
         ckpt_path is None
@@ -114,28 +143,33 @@ def load_flow_model(name: str, device: str | torch.device = "cuda", hf_download:
     ):
         ckpt_path = hf_hub_download(configs[name].repo_id, configs[name].repo_flow)
 
-    with torch.device("meta" if ckpt_path is not None else device):
-        model = Flux(configs[name].params).to(torch.bfloat16)
+    model = Flux(configs[name].params)
+
+    for p in model.get_parameters():
+        p.set_dtype(ms.bfloat16)
 
     if ckpt_path is not None:
-        print("Loading checkpoint")
-        # load_sft doesn't support torch.device
-        sd = load_sft(ckpt_path, device=str(device))
-        missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
+        logger.info("Loading checkpoint")
+        sd = load_sft(ckpt_path)
+        missing, unexpected = ms.load_param_into_net(model, sd, strict_load=False)
         print_load_warning(missing, unexpected)
     return model
 
 
-def load_t5(device: str | torch.device = "cuda", max_length: int = 512) -> HFEmbedder:
+def load_t5(max_length: int = 512) -> HFEmbedder:
     # max length 64, 128, 256 and 512 should work (if your sequence is short enough)
-    return HFEmbedder("google/t5-v1_1-xxl", max_length=max_length, torch_dtype=torch.bfloat16).to(device)
+    return HFEmbedder(
+        "google/t5-v1_1-xxl", max_length=max_length, mindspore_dtype=ms.bfloat16
+    )
 
 
-def load_clip(device: str | torch.device = "cuda") -> HFEmbedder:
-    return HFEmbedder("openai/clip-vit-large-patch14", max_length=77, torch_dtype=torch.bfloat16).to(device)
+def load_clip() -> HFEmbedder:
+    return HFEmbedder(
+        "openai/clip-vit-large-patch14", max_length=77, mindspore_dtype=ms.bfloat16
+    )
 
 
-def load_ae(name: str, device: str | torch.device = "cuda", hf_download: bool = True) -> AutoEncoder:
+def load_ae(name: str, hf_download: bool = True) -> AutoEncoder:
     ckpt_path = configs[name].ae_path
     if (
         ckpt_path is None
@@ -146,13 +180,12 @@ def load_ae(name: str, device: str | torch.device = "cuda", hf_download: bool = 
         ckpt_path = hf_hub_download(configs[name].repo_id, configs[name].repo_ae)
 
     # Loading the autoencoder
-    print("Init AE")
-    with torch.device("meta" if ckpt_path is not None else device):
-        ae = AutoEncoder(configs[name].ae_params)
+    logger.info("Init AE")
+    ae = AutoEncoder(configs[name].ae_params)
 
     if ckpt_path is not None:
-        sd = load_sft(ckpt_path, device=str(device))
-        missing, unexpected = ae.load_state_dict(sd, strict=False, assign=True)
+        sd = load_sft(ckpt_path)
+        missing, unexpected = ms.load_param_into_net(ae, sd, strict_load=False)
         print_load_warning(missing, unexpected)
     return ae
 
@@ -164,7 +197,7 @@ class WatermarkEmbedder:
         self.encoder = WatermarkEncoder()
         self.encoder.set_watermark("bits", self.watermark)
 
-    def __call__(self, image: torch.Tensor) -> torch.Tensor:
+    def __call__(self, image: ms.Tensor) -> ms.Tensor:
         """
         Adds a predefined watermark to the input image
 
@@ -179,15 +212,23 @@ class WatermarkEmbedder:
         if squeeze:
             image = image[None, ...]
         n = image.shape[0]
-        image_np = rearrange((255 * image).detach().cpu(), "n b c h w -> (n b) h w c").numpy()[:, :, :, ::-1]
+        n, b, c, h, w = image.shape
+        image_np = (
+            (255 * image)
+            .reshape(-1, c, h, w)
+            .permute(0, 2, 3, 1)
+            .numpy()[:, :, :, ::-1]
+        )
         # torch (b, c, h, w) in [0, 1] -> numpy (b, h, w, c) [0, 255]
         # watermarking libary expects input as cv2 BGR format
         for k in range(image_np.shape[0]):
             image_np[k] = self.encoder.encode(image_np[k], "dwtDct")
-        image = torch.from_numpy(rearrange(image_np[:, :, :, ::-1], "(n b) h w c -> n b c h w", n=n)).to(
-            image.device
+        image = (
+            ms.Tensor.from_numpy(image_np[:, :, :, ::-1])
+            .reshape(n, b, h, w, c)
+            .permute(0, 1, 4, 2, 3)
         )
-        image = torch.clamp(image / 255, min=0.0, max=1.0)
+        image = ops.clamp(image / 255, min=0.0, max=1.0)
         if squeeze:
             image = image[0]
         image = 2 * image - 1

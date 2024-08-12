@@ -2,6 +2,7 @@ import io
 import os
 import time
 from pathlib import Path
+from typing import Dict, List, Optional, Union
 
 import requests
 from PIL import Image
@@ -10,7 +11,9 @@ API_ENDPOINT = "https://api.bfl.ml"
 
 
 class ApiException(Exception):
-    def __init__(self, status_code: int, detail: str | list[dict] | None = None):
+    def __init__(
+        self, status_code: int, detail: Optional[Union[str, List[Dict]]] = None
+    ):
         super().__init__()
         self.detail = detail
         self.status_code = status_code
@@ -37,10 +40,10 @@ class ImageRequest:
         name: str = "flux.1-pro",
         num_steps: int = 50,
         prompt_upsampling: bool = False,
-        seed: int | None = None,
+        seed: Optional[int] = None,
         validate: bool = True,
         launch: bool = True,
-        api_key: str | None = None,
+        api_key: Optional[str] = None,
     ):
         """
         Manages an image generation request to the API.
@@ -86,10 +89,10 @@ class ImageRequest:
         if seed is not None:
             self.request_json["seed"] = seed
 
-        self.request_id: str | None = None
-        self.result: dict | None = None
-        self._image_bytes: bytes | None = None
-        self._url: str | None = None
+        self.request_id: Optional[str] = None
+        self.result: Optional[dict] = None
+        self._image_bytes: Optional[bytes] = None
+        self._url: Optional[str] = None
         if api_key is None:
             self.api_key = os.environ.get("BFL_API_KEY")
         else:
@@ -115,7 +118,9 @@ class ImageRequest:
         )
         result = response.json()
         if response.status_code != 200:
-            raise ApiException(status_code=response.status_code, detail=result.get("detail"))
+            raise ApiException(
+                status_code=response.status_code, detail=result.get("detail")
+            )
         self.request_id = response.json()["id"]
 
     def retrieve(self) -> dict:
@@ -137,13 +142,17 @@ class ImageRequest:
             )
             result = response.json()
             if "status" not in result:
-                raise ApiException(status_code=response.status_code, detail=result.get("detail"))
+                raise ApiException(
+                    status_code=response.status_code, detail=result.get("detail")
+                )
             elif result["status"] == "Ready":
                 self.result = result["result"]
             elif result["status"] == "Pending":
                 time.sleep(0.5)
             else:
-                raise ApiException(status_code=200, detail=f"API returned status '{result['status']}'")
+                raise ApiException(
+                    status_code=200, detail=f"API returned status '{result['status']}'"
+                )
         return self.result
 
     @property
